@@ -140,3 +140,8 @@ if __name__ == '__main__':
     
     # Execute the main function
     create_feature_set(RAW_DATA_PATH, PROCESSED_DATA_PATH)
+
+def flatten_multi_level_columns(df):
+    """Flattens pandas multi-level columns into a single level."""
+    df.columns = ['_'.join(col).strip() for col in df.columns.values]
+    return df
