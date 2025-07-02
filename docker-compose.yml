@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  api:
+    # Build the Docker image from the Dockerfile in the current directory
+    build: .
+    # Map port 8000 on the host to port 8000 in the container
+    ports:
+      - "8000:8000"
+    # Mount the mlruns directory from the host into the container.
+    # This allows the container to access the models logged by MLflow
+    # without needing to rebuild the image every time a model is trained.
+    volumes:
+      - ./mlruns:/app/mlruns
