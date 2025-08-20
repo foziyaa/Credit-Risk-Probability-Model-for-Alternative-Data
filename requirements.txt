@@ -319,3 +319,23 @@ mlflow
 shap
 streamlit
 matplotlib  
+# FastAPI and Server
+fastapi
+uvicorn[standard]
+
+# Data and ML
+pandas
+scikit-learn==1.4.2
+mlflow
+shap
+streamlit
+matplotlib
+
+# Streamlit Components
+streamlit-shap
+
+# Testing - These are needed for the CI pipeline to run tests
+pytest
+httpx
+anyio
+trio
