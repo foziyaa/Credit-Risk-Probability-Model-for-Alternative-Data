@@ -3,55 +3,59 @@
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from pathlib import Path
 import logging
+from . import config
 
 # Configure logging to provide feedback during execution
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Define the base directory of the project to handle file paths robustly
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-def find_high_risk_cluster(centroids_df):
+def load_data(path):
     """
-    Identifies the cluster ID corresponding to the highest risk segment.
-    
-    The primary hypothesis is that high-risk customers are those who are least engaged.
-    This is characterized by High Recency (long time since last purchase),
-    Low Frequency, and Low Monetary value. We prioritize identifying the cluster
-    with the highest Recency as the main indicator of this "lapsed" or disengaged group.
+    Loads data from a specified CSV file path.
 
     Args:
-        centroids_df (pd.DataFrame): DataFrame containing the cluster centroids
-                                     with columns 'Recency', 'Frequency', 'Monetary'.
+        path (Path): The path to the CSV file.
 
     Returns:
-        int: The cluster ID (index) identified as high-risk.
+        pd.DataFrame: The loaded data as a pandas DataFrame.
+    
+    Raises:
+        FileNotFoundError: If the data file does not exist at the given path.
     """
-    # The high-risk cluster is the one with the highest Recency
-    high_risk_cluster_id = centroids_df['Recency'].idxmax()
-    return high_risk_cluster_id
-
-def create_feature_set(raw_data_path, processed_data_path):
-   
-    logging.info("Starting feature engineering and proxy target creation process...")
-
-    # 1. Load Data
+    logging.info(f"Loading data from {path}...")
     try:
-        df = pd.read_csv(raw_data_path)
-        logging.info(f"Raw data loaded successfully. Shape: {df.shape}")
+        return pd.read_csv(path)
     except FileNotFoundError:
-        logging.error(f"Raw data file not found at {raw_data_path}. Aborting.")
-        return
+        logging.error(f"Data file not found at {path}. Aborting.")
+        raise
 
-    # 2. Basic Preprocessing
+def preprocess_data(df):
+    """
+    Performs initial data cleaning and transformations on the raw DataFrame.
+
+    Args:
+        df (pd.DataFrame): The raw transaction DataFrame.
+
+    Returns:
+        pd.DataFrame: The preprocessed DataFrame.
+    """
+    logging.info("Preprocessing data...")
     df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'])
-    # Use 'Value' as it's the absolute transaction amount, which is more suitable for RFM
+    # 'Value' is the absolute transaction amount, more suitable for RFM analysis.
     df = df.rename(columns={'Value': 'TransactionValue'})
-    
-    # 3. Aggregate data to CustomerId level
-    logging.info("Aggregating transaction data to the customer level...")
-    
+    return df
+
+def aggregate_customer_data(df):
+    """
+    Aggregates transaction data to the customer level to create a customer-centric view.
+
+    Args:
+        df (pd.DataFrame): The preprocessed transaction DataFrame.
+
+    Returns:
+        pd.DataFrame: A DataFrame with one row per customer and aggregated features.
+    """
+    logging.info("Aggregating data to customer level...")
     aggregation_rules = {
         'TransactionId': 'count',
         'TransactionValue': ['sum', 'mean', 'std'],
@@ -59,89 +63,119 @@ def create_feature_set(raw_data_path, processed_data_path):
         'ProductId': pd.Series.nunique,
         'ProviderId': pd.Series.nunique
     }
-
     customer_df = df.groupby('CustomerId').agg(aggregation_rules).reset_index()
-
-    # Flatten the multi-level column names for easier access
+    
+    # Flatten multi-level column names for easier access
     customer_df.columns = [
-        'CustomerId', 'Frequency', 'Monetary', 'AvgMonetary', 
+        'CustomerId', 'Frequency', 'Monetary', 'AvgMonetary',
         'StdMonetary', 'FirstTransactionDate', 'LastTransactionDate',
         'NumUniqueProducts', 'NumUniqueProviders'
     ]
-    
-    # Fill NaN in StdMonetary (occurs for customers with only one transaction) with 0
+    # Handle cases where customers have only one transaction, resulting in NaN for std dev
     customer_df['StdMonetary'] = customer_df['StdMonetary'].fillna(0)
+    return customer_df
 
-    # 4. Engineer RFM and other behavioral features
+def engineer_features(customer_df, snapshot_date):
+    """
+    Engineers RFM (Recency) and Tenure features for each customer.
+
+    Args:
+        customer_df (pd.DataFrame): The customer-aggregated DataFrame.
+        snapshot_date (pd.Timestamp): The reference date for calculating recency.
+
+    Returns:
+        pd.DataFrame: The DataFrame with new 'Recency' and 'Tenure' columns.
+    """
     logging.info("Engineering RFM and tenure features...")
-    
-    # Define a snapshot date for consistent Recency calculation
-    snapshot_date = df['TransactionStartTime'].max() + pd.Timedelta(days=1)
+    # Calculate Recency: days since the last transaction from a fixed snapshot date.
     customer_df['Recency'] = (snapshot_date - customer_df['LastTransactionDate']).dt.days
-
-    # Calculate Customer Tenure (lifetime in days)
+    # Calculate Tenure: the customer's lifetime in days.
     customer_df['Tenure'] = (customer_df['LastTransactionDate'] - customer_df['FirstTransactionDate']).dt.days
-    
-    # --- Proxy Target Variable Engineering (Task 4) ---
+    return customer_df
 
-    # 5. Cluster customers based on RFM profile
-    logging.info("Clustering customers using K-Means on RFM features...")
-    
+def find_high_risk_cluster(centroids_df):
+    """
+    Identifies the cluster ID corresponding to the highest-risk segment.
+    The primary hypothesis is that high-risk customers are the least engaged,
+    characterized by the highest Recency (longest time since last purchase).
+
+    Args:
+        centroids_df (pd.DataFrame): DataFrame containing cluster centroids.
+
+    Returns:
+        int: The cluster ID identified as high-risk.
+    """
+    return centroids_df['Recency'].idxmax()
+
+def create_proxy_target(customer_df):
+    """
+    Clusters customers based on RFM features to create a binary high-risk target variable.
+
+    Args:
+        customer_df (pd.DataFrame): The customer DataFrame with engineered features.
+
+    Returns:
+        pd.DataFrame: The DataFrame with the new 'is_high_risk' target column.
+    """
+    logging.info("Clustering customers to create proxy target...")
     rfm_features = customer_df[['Recency', 'Frequency', 'Monetary']]
     
-    # Scale RFM features to ensure each feature contributes equally to the distance calculation
+    # Scale features to ensure equal contribution to distance calculation
     scaler = StandardScaler()
     rfm_scaled = scaler.fit_transform(rfm_features)
 
-    # Apply K-Means clustering to segment customers into 3 groups
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    # Use K-Means to segment customers into 3 groups
+    kmeans = KMeans(n_clusters=3, random_state=config.RANDOM_STATE, n_init=10)
     customer_df['Cluster'] = kmeans.fit_predict(rfm_scaled)
 
-    # 6. Define and Assign the "High-Risk" Proxy Label
-    # Inverse transform the cluster centers to interpret them in their original scale
+    # Interpret cluster centers by transforming them back to the original scale
     cluster_centers = pd.DataFrame(scaler.inverse_transform(kmeans.cluster_centers_), columns=['Recency', 'Frequency', 'Monetary'])
+    logging.info(f"Interpreted cluster centroids:\n{cluster_centers}")
     
-    logging.info("Interpreting cluster centroids (in original scale):")
-    logging.info(f"\n{cluster_centers}")
-    
-    # Use our helper function to identify the high-risk cluster
+    # Identify the high-risk cluster based on the highest recency
     high_risk_cluster_id = find_high_risk_cluster(cluster_centers)
-    logging.info(f"Identified high-risk cluster ID as: {high_risk_cluster_id}")
+    logging.info(f"Identified high-risk cluster ID: {high_risk_cluster_id}")
     
-    # Create the binary target variable 'is_high_risk'
-    customer_df['is_high_risk'] = (customer_df['Cluster'] == high_risk_cluster_id).astype(int)
+    # Create the binary target variable
+    customer_df[config.TARGET_VARIABLE] = (customer_df['Cluster'] == high_risk_cluster_id).astype(int)
+    return customer_df
 
-    # 7. Finalize the dataset and save
-    logging.info("Finalizing the dataset for model training...")
-    
-    # Select the final set of features and the target variable for the model
-    features_to_keep = [
-        'CustomerId',
-        'Recency', 'Frequency', 'Monetary', 'AvgMonetary', 'StdMonetary',
-        'Tenure', 'NumUniqueProducts', 'NumUniqueProviders',
-        'is_high_risk' # This is our target variable
-    ]
-    final_df = customer_df[features_to_keep]
+def finalize_and_save_data(customer_df, path):
+    """
+    Selects the final set of features for modeling and saves the dataset to a CSV file.
 
-    # Ensure the output directory exists before saving
-    processed_data_path.parent.mkdir(parents=True, exist_ok=True)
+    Args:
+        customer_df (pd.DataFrame): The fully processed customer DataFrame.
+        path (Path): The file path to save the final dataset.
+    """
+    logging.info("Finalizing and saving the dataset...")
+    # Select features defined in the config file, plus CustomerId and the target
+    features_to_select = ['CustomerId'] + config.FEATURES_TO_KEEP + [config.TARGET_VARIABLE]
+    final_df = customer_df[features_to_select]
     
-    # Save the processed data to a new CSV file
-    final_df.to_csv(processed_data_path, index=False)
+    # Ensure the output directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
     
-    logging.info(f"Processed data successfully saved to: {processed_data_path}")
-    logging.info(f"Final dataset shape: {final_df.shape}")
+    final_df.to_csv(path, index=False)
+    logging.info(f"Processed data successfully saved to {path}. Final shape: {final_df.shape}")
+
+def main():
+    """Main pipeline to execute the full data processing workflow."""
+    logging.info("Starting feature engineering and proxy target creation process...")
+    
+    df = load_data(config.RAW_DATA_PATH)
+    preprocessed_df = preprocess_data(df)
+    
+    # Use a consistent snapshot date for reproducible Recency calculation
+    snapshot_date = preprocessed_df['TransactionStartTime'].max() + pd.Timedelta(days=1)
+    
+    customer_df = aggregate_customer_data(preprocessed_df)
+    customer_df_with_features = engineer_features(customer_df, snapshot_date)
+    customer_df_with_target = create_proxy_target(customer_df_with_features)
+    
+    finalize_and_save_data(customer_df_with_target, config.PROCESSED_DATA_PATH)
+    
     logging.info("Data processing complete.")
 
 if __name__ == '__main__':
-    # Define file paths using the base directory for portability
-    RAW_DATA_PATH = BASE_DIR / 'data' / 'raw' / 'training.csv'
-    PROCESSED_DATA_PATH = BASE_DIR / 'data' / 'processed' / 'customer_features.csv'
-    
-    # Execute the main function
-    create_feature_set(RAW_DATA_PATH, PROCESSED_DATA_PATH)
-
-def flatten_multi_level_columns(df):
-    """Flattens pandas multi-level columns into a single level."""
-    df.columns = ['_'.join(col).strip() for col in df.columns.values]
-    return df
+    main()
